@@ -45,7 +45,7 @@ model.compile(optimizer='adam', loss='mse')
 model.fit(X_train, y_train, epochs=50, batch_size=16, validation_data=(X_test, y_test), verbose=0)
 
 current_co2 = df['co2'].iloc[-1]
-last_sequence = scaled_data[-12:].reshape(1, 12, 1)
+last_sequence = scaled_data[-48:].reshape(1, 48, 1)
 predictions = []
 
 for month in range(48): # predict 48 months
