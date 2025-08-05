@@ -19,7 +19,7 @@ scaler = MinMaxScaler()
 scaled_data = scaler.fit_transform(df['co2'].values.reshape(-1, 1))
 
 
-def make_sequences(data, lookback=48): # use past 48 months for training
+def make_sequences(data, lookback=120): # use past 48 months for training
     X, y = [], []
     for i in range(lookback, len(data)):
         X.append(data[i-lookback:i])
@@ -36,7 +36,7 @@ y_train, y_test = y[:split], y[split:]
 print(f"Training AI with {len(X_train)} examples...")
 
 model = Sequential([
-    LSTM(64, return_sequences=True, input_shape=(12, 1)),
+    LSTM(64, return_sequences=True, input_shape=(120, 1)),
     LSTM(32),
     Dense(1)
 ])
@@ -45,7 +45,7 @@ model.compile(optimizer='adam', loss='mse')
 model.fit(X_train, y_train, epochs=50, batch_size=16, validation_data=(X_test, y_test), verbose=0)
 
 current_co2 = df['co2'].iloc[-1]
-last_sequence = scaled_data[-48:].reshape(1, 48, 1)
+last_sequence = scaled_data[-120:].reshape(1, 120, 1)
 predictions = []
 
 for month in range(48): # predict 48 months
