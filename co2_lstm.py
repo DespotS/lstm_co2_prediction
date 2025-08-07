@@ -1,100 +1,73 @@
 import pandas as pd
-import numpy as np
+from autots import AutoTS
+from datetime import datetime
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
-import datetime
+import matplotlib.dates as mdates
 
+# === Load and clean CSV ===
+df = pd.read_csv("data/co2_mm_mlo.csv", sep=",", comment="#")
+df["average"] = pd.to_numeric(df["average"], errors="coerce")
+df["decimal date"] = pd.to_numeric(df["decimal date"], errors="coerce")
+df = df[df["average"] > 0]
+df = df[["decimal date", "average"]].copy()
+df.columns = ["date_decimal", "CO2"]
 
-df = pd.read_csv('data/co2_mm_mlo.csv', 
-                 names=["year", "month", "decimal_date", "average", "deseasonalized", "ndays", "sdev", "unc"])
+# === Convert decimal year to datetime (monthly) ===
+def decimal_year_to_month(decimal_year):
+    year = int(decimal_year)
+    rem = decimal_year - year
+    month = int(round(rem * 12)) + 1
+    if month > 12:
+        month = 12
+    return datetime(year, month, 1)
 
-df['decimal_date'] = pd.to_numeric(df['decimal_date'], errors='coerce')
-df['average'] = pd.to_numeric(df['average'], errors='coerce')
-df = df[["decimal_date", "average"]].replace(-9.99, np.nan).dropna()
-df.columns = ["date", "co2"]
+df["date"] = df["date_decimal"].apply(decimal_year_to_month)
+df = df.drop_duplicates(subset="date").sort_values("date").reset_index(drop=True)
+df_final = df[["date", "CO2"]].copy()
 
-scaler = MinMaxScaler()
-scaled_data = scaler.fit_transform(df['co2'].values.reshape(-1, 1))
+# === AutoTS Forecasting ===
+model = AutoTS(
+    forecast_length=48,  # 4 years
+    frequency='M',
+    ensemble="simple",
+    model_list=["ARIMA", "ETS", "Prophet", "LastValueNaive", "DatepartRegression"],
+    transformer_list="superfast",
+    max_generations=4,
+    num_validations=2,
+    validation_method="backwards"
+)
+model = model.fit(df_final, date_col="date", value_col="CO2", id_col=None)
+prediction = model.predict()
+forecast_df = prediction.forecast
 
+# === Calculate rate and summary for legend ===
+last_2024 = df_final[df_final["date"].dt.year == 2024]["CO2"].iloc[-1]
+last_forecast = forecast_df["CO2"].iloc[-1]
+forecast_end_year = forecast_df.index[-1].year
+years_forecasted = forecast_end_year - 2024
+ppm_rate = round((last_forecast - last_2024) / years_forecasted, 2)
 
-def make_sequences(data, lookback=120): # use past 48 months for training
-    X, y = [], []
-    for i in range(lookback, len(data)):
-        X.append(data[i-lookback:i])
-        y.append(data[i])
-    return np.array(X), np.array(y)
-
-X, y = make_sequences(scaled_data)
-X = X.reshape((X.shape[0], X.shape[1], 1))
-
-split = int(len(X) * 0.8)
-X_train, X_test = X[:split], X[split:]
-y_train, y_test = y[:split], y[split:]
-
-print(f"Training AI with {len(X_train)} examples...")
-
-model = Sequential([
-    LSTM(64, return_sequences=True, input_shape=(120, 1)),
-    LSTM(32),
-    Dense(1)
-])
-
-model.compile(optimizer='adam', loss='mse')
-model.fit(X_train, y_train, epochs=50, batch_size=16, validation_data=(X_test, y_test), verbose=0)
-
-current_co2 = df['co2'].iloc[-1]
-last_sequence = scaled_data[-120:].reshape(1, 120, 1)
-predictions = []
-
-for month in range(48): # predict 48 months
-    pred = model.predict(last_sequence, verbose=0)
-    predictions.append(pred[0, 0])
-    # Update sequence for next prediction
-    last_sequence = np.roll(last_sequence, -1, axis=1)
-    last_sequence[0, -1, 0] = pred[0, 0]
-
-predictions = scaler.inverse_transform(np.array(predictions).reshape(-1, 1))
-
-# check model prediction
-predicted_annual_rate = (predictions[-1, 0] - current_co2) / 4
-
-if predicted_annual_rate < 0.5 or predicted_annual_rate > 5.0:
-    print(" AI prediction seems off, applying gentle correction...")
-    recent_trend = (df['co2'].iloc[-1] - df['co2'].iloc[-25]) / 2  # last 2 years
-    months = np.arange(48)
-    predictions = current_co2 + (recent_trend * (months + 1) / 12)
-    predictions = predictions.reshape(-1, 1)
-    print(f" Using historical trend: +{recent_trend:.1f} ppm/year")
-else:
-    print(" AI predictions look reasonable!")
-
-start_date = df['date'].iloc[-1]
-future_dates = []
-for i in range(48):
-    date = start_date + (i + 1)/12
-    year = int(date)
-    month = int((date - year) * 12) + 1
-    future_dates.append(datetime.datetime(year, month, 1))
-
+# === Plot ===
 plt.figure(figsize=(12, 6))
-plt.plot(future_dates, predictions.flatten(), 'r-', linewidth=3, marker='o', markersize=2)
-plt.title(' CO₂ Predictions for Next 4 Years', fontsize=16, pad=20)
-plt.xlabel('Year', fontsize=12)
-plt.ylabel('CO₂ (ppm)', fontsize=12)
-plt.grid(True, alpha=0.3)
+df_plot = df_final[df_final["date"] >= datetime(1980, 1, 1)]
+plt.plot(df_plot["date"], df_plot["CO2"], label="Historical CO₂")
+plt.plot(forecast_df.index, forecast_df["CO2"], label="Forecast CO₂")
 
-# format dates
-from matplotlib.dates import DateFormatter, YearLocator
-plt.gca().xaxis.set_major_locator(YearLocator())
-plt.gca().xaxis.set_major_formatter(DateFormatter('%Y'))
+# Clean x-axis (years only)
+plt.gca().xaxis.set_major_locator(mdates.YearLocator())
+plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+plt.xticks(rotation=45)
 
-# info box
-increase = predictions[-1, 0] - current_co2
-plt.text(0.02, 0.98, f'Current: {current_co2:.0f} ppm\n4-year increase: +{increase:.0f} ppm\nRate: +{increase/4:.1f} ppm/year', 
-         transform=plt.gca().transAxes, fontsize=11, verticalalignment='top',
-         bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
-
+# Add labels
+plt.title("CO₂ Forecast with AutoTS (From 1970)")
+plt.xlabel("Year")
+plt.ylabel("CO₂ ppm")
+plt.legend(
+    title=f"2024 CO₂: {last_2024:.2f} ppm\n"
+          f"{forecast_end_year} CO₂: {last_forecast:.2f} ppm\n"
+          f"↑ {ppm_rate} ppm/year"
+)
+plt.grid(True)
 plt.tight_layout()
 plt.show()
+print(model.best_model)
